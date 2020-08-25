@@ -1,0 +1,144 @@
+---
+title: "IC-MODEL1"
+author: "Saier Gong"
+date: "08/08/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,error = FALSE,warning = FALSE)
+library(dplyr)
+library(lubridate)
+#source(file='Data_processing.R')
+```
+
+## IMPORT DATA
+```{r}
+
+data<-read.csv(file="US-Coronavirus-data.csv",header = TRUE) %>%
+  mutate(date=as.Date(date)) %>%
+  mutate(daily.D=D-c(0,D[-length(D)])) %>% # to count the daily deaths
+  filter(!is.na(C)) %>%
+  filter(date>=as.Date('2020-02-29'))
+
+D<-data %>%
+  select(date,I,D,daily.D) %>%
+  filter(date<=as.Date("2020-07-31"))
+
+```
+
+```{r tran}
+trans<-data$I[-1]/data$I[-nrow(data)] #from March to May
+#tran.D<-data$D[-1]/data$D[-nrow(data)]
+```
+ 
+ In our model, we define the transmission rate as: $rate_{today}=\frac{ExistingInfectious_{today}}{ExistingInfectious_{yesterday}}$
+ This is the transimission rate of each day in our training dataset, we will use this vector to do the following model.
+ 
+## MODEL
+ 
+After reading the references(https://mrc-ide.github.io/covid19-short-term-forecasts/index.html#methods), we plan to write the model based on our understanding. Since in this model, we need to use the prior distriburion of $R_t$, we decided to use the Gamma prior distribution of $R_t$ with $\mu = mean(TransmissionRate_{last7days}), \sigma = sd(TransmissionRate_{last7days})$. And we used the transmission rate of the last day in our training set as the start value of $R_t$ in the MCMC process.
+
+
+
+```{r}
+
+library(purrr)
+Rt<- mean(tail(trans,1))
+mu<-mean(tail(trans,7))
+v<-var(tail(trans,7))
+rate=mu/v
+shape=mu*rate
+
+
+daily<-D$daily.D
+l<-length(daily)
+
+###posterior of Rt,tao
+R<-Rt
+A<-c()
+#####MCMC
+for (i in 1:2000) {
+  #1st given Rt
+  daily[l-6]<-rpois(1,lambda = Rt * mean(head(daily,l-7)) )
+  daily[l-5]<-rpois(1,lambda = Rt * mean(head(daily,l-6)) )
+  daily[l-4]<-rpois(1,lambda = Rt * mean(head(daily,l-5)) )
+  daily[l-3]<-rpois(1,lambda = Rt * mean(head(daily,l-4)) )
+  daily[l-2]<-rpois(1,lambda = Rt * mean(head(daily,l-3)) )
+  daily[l-1]<-rpois(1,lambda = Rt * mean(head(daily,l-2)) )
+  daily[l-0]<-rpois(1,lambda = Rt * mean(head(daily,l-1)) )
+  
+  shape<-shape+sum(tail(daily,7))
+  rate<-rate+mean(head(daily,l-6-1))+mean(head(daily,l-5-1))+mean(head(daily,l-4-1))+mean(head(daily,l-3-1))+mean(head(daily,l-2-1))+mean(head(daily,l-1-1))+mean(head(daily,l-0-1))
+  Rt<-rgamma(1,shape=shape,rate=rate)
+  
+  R<-append(R,Rt)
+  A<-rbind(A,tail(daily,7))
+  
+  
+}
+
+
+
+R.post<-mean(tail(R,500))
+R.post
+
+w.exam.post<-colMeans(A)
+w.exam.post
+
+daily[(l-6):l]<-w.exam.post
+
+
+
+```
+
+So $R_{t.post}$ is the estimated value of $R_t$ that wil remain constant in the shorterm forecasting, the vector $w.exam.post$ is the estimated value of daily deaths in part of the training group (from 7/25 to 7/31). We will count the estimated total deaths in these 7 days and calculate the MSE and RMSE.
+
+
+## MSE & RMSE
+
+```{r mse}
+library(purrr)
+total<-map_dbl(1:length(daily),function(x) sum(head(daily,x)))
+tail(total,7)
+
+mse<-mean((tail(total,7)-tail(D$D,7))^2)
+mse
+rmse<-sqrt(mse)
+rmse
+#(l1<-mean(abs(tail(total,7)-tail(D$D,7))))
+```
+
+
+## SHORTERM FORECASTING (8/1-8/7)
+
+```{r forecast}
+####forcast of the following 7 days of daily deaths
+t<-7
+w<-c()
+
+for (iter in 1:2000) {
+  daily<-D$daily.D
+  l<-length(daily)
+  
+  for (i in (l+1):(l+t)) {
+    d<-rpois(1,R.post* (mean(head(daily,i-1))) )
+    daily[i]<-d
+  }
+
+#daily
+
+  total.new<-map_dbl(1:length(daily),function(x) sum(head(daily,x)))
+
+  w.fore<-tail(total.new,t)
+  w<-rbind(w,w.fore)
+  
+}
+
+answer=colMeans(tail(w,500))
+
+temp<-seq(from=as.Date('2020-08-01'),by='day',length.out = t)
+(pred=tibble(date=temp,`prediction in total deaths`=answer))
+
+
+```
